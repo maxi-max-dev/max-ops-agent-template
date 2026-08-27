@@ -1,0 +1,4 @@
+interface:
+  display_name: "MAX OPS Reporter"
+  short_description: "让任意 Agent 读取指定任务并回报 MAX OPS"
+  default_prompt: "Use $max-ops-report to connect this explicitly authorized task to MAX OPS, read the scoped task, and report the Agent run with questions, artifacts, and receipts."
