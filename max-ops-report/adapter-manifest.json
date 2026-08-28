@@ -1,0 +1,76 @@
+{
+  "schema_version": "maxops-adapter/1",
+  "adapter_id": "codex-reference",
+  "display_name": "Codex reference adapter",
+  "reference_runtime": "Codex",
+  "runtime_neutral": true,
+  "contract": "references/adapter-contract.md",
+  "capabilities": [
+    "connect",
+    "read_scoped_task",
+    "report_lifecycle",
+    "ask_question",
+    "propose_status",
+    "deliver_artifact",
+    "receive_inbox",
+    "acknowledge_message",
+    "preserve_receipt"
+  ],
+  "identity": {
+    "configurable": true,
+    "agent_id": {
+      "environment": "MAXOPS_AGENT_ID",
+      "cli": "--agent-id",
+      "default": "codex"
+    },
+    "agent_name": {
+      "environment": "MAXOPS_AGENT_NAME",
+      "cli": "--agent-name",
+      "default": "Codex"
+    }
+  },
+  "task_scope": {
+    "mode": "single_explicit_record",
+    "requires_user_supplied_record_id": true,
+    "board_enumeration": false,
+    "title_inference": false
+  },
+  "operations": {
+    "connect": "node scripts/maxops.mjs connect --url <maxops_url> --task <record_id>",
+    "read": "node scripts/maxops.mjs task --task <record_id>",
+    "start": "node scripts/maxops.mjs start --task <record_id> --title <text> --detail <text>",
+    "progress": "node scripts/maxops.mjs progress --task <record_id> --title <text> --detail <text>",
+    "blocker": "node scripts/maxops.mjs blocked --task <record_id> --title <text> --detail <text>",
+    "question": "node scripts/maxops.mjs blocked --task <record_id> --title <text> --detail <text> --question <text>",
+    "status_request": "node scripts/maxops.mjs status-request --task <record_id> --from <current_status> --to <proposed_status> --detail <reason>",
+    "artifact": "node scripts/maxops.mjs artifact --task <record_id> --title <text> --detail <text> --artifact <https-url>",
+    "finish": "node scripts/maxops.mjs finish --task <record_id> --title <text> --detail <text>",
+    "inbox": "node scripts/maxops.mjs inbox",
+    "ack": "node scripts/maxops.mjs ack --message <message_id>",
+    "receipt": "preserve receipt_id returned by event, question, instruction, and acknowledgement responses"
+  },
+  "authentication": {
+    "scheme": "bearer",
+    "secret_environment": "MAXOPS_AGENT_TOKEN",
+    "secret_cli_argument": false,
+    "reject_secret_in_url_or_body": true,
+    "secret_must_not_enter_chat_or_artifacts": true
+  },
+  "onboarding": {
+    "command": "node scripts/maxops.mjs connect --url <maxops_url> --task <record_id>",
+    "sequence": ["validate_manifest", "authenticated_health", "read_scoped_task", "return_stable_run_id"],
+    "mutates_remote_state": false
+  },
+  "idempotency": {
+    "required_for_mutations": true,
+    "key_length": "12..200",
+    "reuse_only_for_same_logical_action": true,
+    "retry_unknown_outcome_with_same_key": true
+  },
+  "source_of_truth": {
+    "feishu_five_state_owner": "Max / confirmed MAX OPS Gate",
+    "agent_direct_status_write": false,
+    "private_feishu_credentials": false
+  },
+  "self_check": "node scripts/validate-adapter.mjs && node scripts/self-test.mjs"
+}

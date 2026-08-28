@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { loadAndValidateManifest } from "./validate-adapter.mjs";
 
-const DEFAULT_URL = "https://max-ops-personal-war-room.maxorila.chatgpt.site";
-const commands = new Set(["doctor", "health", "new-run", "task", "start", "progress", "blocked", "artifact", "finish", "inbox", "ack"]);
+const commands = new Set(["doctor", "connect", "health", "new-run", "task", "start", "progress", "blocked", "status-request", "artifact", "finish", "inbox", "ack"]);
+const forbiddenSecretOptions = new Set(["token", "agent-token", "authorization", "bearer", "app-secret", "base-token"]);
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -12,6 +13,9 @@ function parseArgs(argv) {
     const value = rest[index];
     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
     const key = value.slice(2);
+    if (forbiddenSecretOptions.has(key) || /(?:token|secret|authorization|bearer)/i.test(key)) {
+      throw new Error(`Do not pass secrets with --${key}. Inject MAXOPS_AGENT_TOKEN through the runtime environment or secret manager.`);
+    }
     if (key === "dry-run") {
       options.dryRun = true;
       continue;
@@ -29,6 +33,17 @@ function required(value, label) {
   return value;
 }
 
+function normalizeBaseUrl(value) {
+  if (!value) return "";
+  let parsed;
+  try { parsed = new URL(value); } catch { throw new Error("MAX OPS URL must be an absolute HTTP(S) URL."); }
+  if (!new Set(["http:", "https:"]).has(parsed.protocol)) throw new Error("MAX OPS URL must use HTTP(S).");
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("MAX OPS URL must not contain credentials, query parameters, or fragments.");
+  }
+  return parsed.href.replace(/\/$/, "");
+}
+
 function idempotency(agentId, runId, action, supplied) {
   return supplied || `${agentId}:${runId}:${action}:${randomUUID()}`;
 }
@@ -38,7 +53,7 @@ function context(options, needsRun = true) {
   const agentName = options.agentName || process.env.MAXOPS_AGENT_NAME || "Codex";
   const runId = options.run || process.env.MAXOPS_RUN_ID;
   return {
-    baseUrl: (options.url || process.env.MAXOPS_URL || DEFAULT_URL).replace(/\/$/, ""),
+    baseUrl: normalizeBaseUrl(options.url || process.env.MAXOPS_URL || ""),
     token: process.env.MAXOPS_AGENT_TOKEN,
     agentId,
     agentName,
@@ -47,7 +62,12 @@ function context(options, needsRun = true) {
 }
 
 async function request(ctx, path, { method = "GET", body, key, dryRun = false } = {}) {
+  required(ctx.baseUrl, "--url or MAXOPS_URL");
   const url = `${ctx.baseUrl}${path}`;
+  const serializedBody = body ? JSON.stringify(body) : "";
+  if (ctx.token && (url.includes(ctx.token) || serializedBody.includes(ctx.token))) {
+    throw new Error("Refusing to place MAXOPS_AGENT_TOKEN in a URL or request body.");
+  }
   if (dryRun) return { dry_run: true, method, url, idempotency_key: key ?? null, body: body ?? null };
   required(ctx.token, "MAXOPS_AGENT_TOKEN");
   const headers = { Authorization: `Bearer ${ctx.token}` };
@@ -55,7 +75,7 @@ async function request(ctx, path, { method = "GET", body, key, dryRun = false } 
   if (key) headers["Idempotency-Key"] = key;
   let response;
   try {
-    response = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    response = await fetch(url, { method, headers, body: serializedBody || undefined });
   } catch (error) {
     throw new Error(`Network outcome unknown. Retry with the same --key${key ? ` (${key})` : ""}. ${error.message}`);
   }
@@ -92,17 +112,23 @@ async function postEvent(ctx, options, kind, state, action = kind) {
 
 async function run(argv) {
   const { command, options } = parseArgs(argv);
-  if (!commands.has(command)) throw new Error("Usage: maxops.mjs <doctor|health|new-run|task|start|progress|blocked|artifact|finish|inbox|ack> [options]");
+  if (!commands.has(command)) throw new Error("Usage: maxops.mjs <doctor|connect|health|new-run|task|start|progress|blocked|status-request|artifact|finish|inbox|ack> [options]");
   if (command === "doctor") {
     const ctx = context(options, false);
     const tokenConfigured = Boolean(ctx.token);
+    const urlConfigured = Boolean(ctx.baseUrl);
     return {
-      ok: tokenConfigured,
-      maxops_url: ctx.baseUrl,
+      ok: tokenConfigured && urlConfigured,
+      maxops_url: ctx.baseUrl || null,
       agent_id: ctx.agentId,
       agent_name: ctx.agentName,
       token_configured: tokenConfigured,
-      next: tokenConfigured ? "Run: node scripts/maxops.mjs health" : "Set MAXOPS_AGENT_TOKEN in the runtime environment or secret manager; never paste it into chat.",
+      url_configured: urlConfigured,
+      next: !urlConfigured
+        ? "Set MAXOPS_URL or pass --url for the authorized MAX OPS deployment."
+        : tokenConfigured
+          ? "Run: node scripts/maxops.mjs connect --task <record_id>"
+          : "Inject MAXOPS_AGENT_TOKEN through the runtime environment or secret manager; never paste it into chat or a command argument.",
     };
   }
   if (command === "new-run") {
@@ -112,6 +138,27 @@ async function run(argv) {
   if (command === "health") {
     const ctx = context(options, false);
     return request(ctx, "/api/agent/v1/health", { dryRun: options.dryRun });
+  }
+  if (command === "connect") {
+    const ctx = context(options, false);
+    const taskId = required(options.task, "--task");
+    const manifest = await loadAndValidateManifest();
+    const health = await request(ctx, "/api/agent/v1/health", { dryRun: options.dryRun });
+    const task = await request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(taskId)}`, { dryRun: options.dryRun });
+    const runId = options.run || process.env.MAXOPS_RUN_ID || `${ctx.agentId}:${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}:${randomUUID().slice(0, 8)}`;
+    return {
+      ok: true,
+      adapter: manifest.adapter_id,
+      checks: { manifest: "passed", health },
+      task,
+      session: {
+        task_id: taskId,
+        agent_id: ctx.agentId,
+        agent_name: ctx.agentName,
+        run_id: runId,
+        instruction: "Retain this run_id and pass it with --run for every lifecycle, inbox, and ack command in this execution.",
+      },
+    };
   }
   if (command === "task") {
     const ctx = context(options, false);
@@ -135,6 +182,23 @@ async function run(argv) {
       },
     });
     return { event, question };
+  }
+  if (command === "status-request") {
+    const taskId = required(options.task, "--task");
+    const fromStatus = required(options.from, "--from");
+    const toStatus = required(options.to, "--to");
+    const detail = required(options.detail, "--detail");
+    const questionKey = idempotency(ctx.agentId, ctx.runId, "status-request", options.key);
+    return request(ctx, "/api/agent/v1/questions", {
+      method: "POST", key: questionKey, dryRun: options.dryRun,
+      body: {
+        agent_id: ctx.agentId,
+        agent_name: ctx.agentName,
+        run_id: ctx.runId,
+        task_id: taskId,
+        question: `状态更新提议（Agent 不直接写入飞书）：${fromStatus} → ${toStatus}。${detail} 请由 Max 通过 Gate 确认或拒绝。`,
+      },
+    });
   }
   if (command === "finish") {
     const results = [];
