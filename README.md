@@ -24,11 +24,15 @@ node scripts/validate-adapter.mjs
 node scripts/self-test.mjs
 ```
 
+没有 MAX OPS 地址、token 或任务 ID 也能完成这一步。它只验证公开合同、客户端和模拟生命周期，不会连接飞书，也不会读取任何人的任务。
+
+第一次接触时，按 [REPRODUCE.md](REPRODUCE.md) 走：先完成任何人都能跑的公开自检，再决定是否进入拥有者授权的真实连接。那一页也明确列出哪些能力现在还不是“一键可用”。
+
 然后在本机安全设置环境变量：
 
 ```bash
 export MAXOPS_URL='https://the-authorized-maxops-deployment.example'
-export MAXOPS_TASK_ID='rec...'
+export MAXOPS_RECORD_ID='rec...'
 export MAXOPS_AGENT_ID='codex'
 export MAXOPS_AGENT_NAME='Codex'
 read -s MAXOPS_AGENT_TOKEN && export MAXOPS_AGENT_TOKEN
@@ -37,8 +41,10 @@ read -s MAXOPS_AGENT_TOKEN && export MAXOPS_AGENT_TOKEN
 一条命令完成真实连接检查、读取已授权任务并返回本次 `run_id`：
 
 ```bash
-node scripts/maxops.mjs connect --url "$MAXOPS_URL" --task "$MAXOPS_TASK_ID"
+node scripts/maxops.mjs connect --url "$MAXOPS_URL" --record "$MAXOPS_RECORD_ID"
 ```
+
+`connect` 会返回真实的 `session.record_id`、`session.task_id` 和 `session.run_id`。后续生命周期命令必须分别保留三者，不能假设 `record_id` 与 `task_id` 相同。
 
 也可以由运行环境或 secret manager 预先注入 `MAXOPS_AGENT_TOKEN`；不要使用 `--token`，客户端会拒绝任何把 secret 放进命令参数的做法。
 

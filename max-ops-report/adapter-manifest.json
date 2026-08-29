@@ -36,15 +36,15 @@
     "title_inference": false
   },
   "operations": {
-    "connect": "node scripts/maxops.mjs connect --url <maxops_url> --task <record_id>",
-    "read": "node scripts/maxops.mjs task --task <record_id>",
-    "start": "node scripts/maxops.mjs start --task <record_id> --title <text> --detail <text>",
-    "progress": "node scripts/maxops.mjs progress --task <record_id> --title <text> --detail <text>",
-    "blocker": "node scripts/maxops.mjs blocked --task <record_id> --title <text> --detail <text>",
-    "question": "node scripts/maxops.mjs blocked --task <record_id> --title <text> --detail <text> --question <text>",
-    "status_request": "node scripts/maxops.mjs status-request --task <record_id> --from <current_status> --to <proposed_status> --detail <reason>",
-    "artifact": "node scripts/maxops.mjs artifact --task <record_id> --title <text> --detail <text> --artifact <https-url>",
-    "finish": "node scripts/maxops.mjs finish --task <record_id> --title <text> --detail <text>",
+    "connect": "node scripts/maxops.mjs connect --url <maxops_url> --record <record_id>",
+    "read": "node scripts/maxops.mjs task --record <record_id>",
+    "start": "node scripts/maxops.mjs start --task <task_id> --record <record_id> --title <text> --detail <text>",
+    "progress": "node scripts/maxops.mjs progress --task <task_id> --record <record_id> --title <text> --detail <text>",
+    "blocker": "node scripts/maxops.mjs blocked --task <task_id> --record <record_id> --title <text> --detail <text>",
+    "question": "node scripts/maxops.mjs blocked --task <task_id> --record <record_id> --title <text> --detail <text> --question <text>",
+    "status_request": "node scripts/maxops.mjs status-request --task <task_id> --record <record_id> --from <current_status> --to <proposed_status> --detail <reason>",
+    "artifact": "node scripts/maxops.mjs artifact --task <task_id> --record <record_id> --title <text> --detail <text> --artifact <https-url>",
+    "finish": "node scripts/maxops.mjs finish --task <task_id> --record <record_id> --title <text> --detail <text>",
     "inbox": "node scripts/maxops.mjs inbox",
     "ack": "node scripts/maxops.mjs ack --message <message_id>",
     "receipt": "preserve receipt_id returned by event, question, instruction, and acknowledgement responses"
@@ -57,7 +57,7 @@
     "secret_must_not_enter_chat_or_artifacts": true
   },
   "onboarding": {
-    "command": "node scripts/maxops.mjs connect --url <maxops_url> --task <record_id>",
+    "command": "node scripts/maxops.mjs connect --url <maxops_url> --record <record_id>",
     "sequence": ["validate_manifest", "authenticated_health", "read_scoped_task", "return_stable_run_id"],
     "mutates_remote_state": false
   },

@@ -14,11 +14,11 @@ Use the bundled zero-dependency CLI. Keep Max, Codex, Claude Code, OpenClaw, and
 3. From this Skill directory, run one read-only bootstrap:
 
    ```bash
-   node scripts/maxops.mjs connect --url "$MAXOPS_URL" --task "$MAXOPS_TASK_ID"
+   node scripts/maxops.mjs connect --url "$MAXOPS_URL" --record "$MAXOPS_RECORD_ID"
    ```
 
 4. Treat success as proof of four checks only: manifest validation, authenticated API health, one scoped task read, and creation/reuse of one stable `run_id`.
-5. Retain the returned `session.run_id` and pass it with `--run` for every later command. If `connect` is repeated for the same execution, pass that same `--run`.
+5. Retain the returned `session.record_id`, `session.task_id`, and `session.run_id`. Pass them with `--record`, `--task`, and `--run` for every later lifecycle command. Do not assume the two task identities are equal. If `connect` is repeated for the same execution, pass that same `--run`.
 6. If the supplied URL is a static Demo and does not expose `/api/agent/v1/health`, stop and explain that it cannot connect Agents. Do not invent an API URL or claim FEISHU LIVE.
 
 Run `node scripts/self-test.mjs` when installing, changing, or diagnosing the adapter. It is an offline test, not a prerequisite on every ordinary run.
@@ -35,7 +35,7 @@ Run `node scripts/self-test.mjs` when installing, changing, or diagnosing the ad
 
 ```bash
 export MAXOPS_URL='https://the-authorized-maxops-deployment.example'
-export MAXOPS_TASK_ID='rec...'
+export MAXOPS_RECORD_ID='rec...'
 export MAXOPS_AGENT_ID='codex'
 export MAXOPS_AGENT_NAME='Codex'
 # MAXOPS_AGENT_TOKEN is already injected by the runtime/secret manager.
@@ -46,16 +46,16 @@ Change only the stable Agent identity for another runtime.
 ## Report the lifecycle
 
 ```bash
-node scripts/maxops.mjs start --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '开始处理' --detail '已读取任务背景与边界。' --key "$MAXOPS_RUN_ID:start:001"
-node scripts/maxops.mjs progress --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '完成关键步骤' --detail '描述已完成且可验证的变化。' --key "$MAXOPS_RUN_ID:progress:001"
-node scripts/maxops.mjs blocked --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '需要回复' --detail '说明真实阻塞。' --question '写出会改变结果的问题。' --key "$MAXOPS_RUN_ID:blocked:001" --question-key "$MAXOPS_RUN_ID:question:001"
-node scripts/maxops.mjs status-request --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --from '待处理' --to '进行中' --detail '已读取任务并开始执行。' --key "$MAXOPS_RUN_ID:status-request:001"
+node scripts/maxops.mjs start --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '开始处理' --detail '已读取任务背景与边界。' --key "$MAXOPS_RUN_ID:start:001"
+node scripts/maxops.mjs progress --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '完成关键步骤' --detail '描述已完成且可验证的变化。' --key "$MAXOPS_RUN_ID:progress:001"
+node scripts/maxops.mjs blocked --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '需要回复' --detail '说明真实阻塞。' --question '写出会改变结果的问题。' --key "$MAXOPS_RUN_ID:blocked:001" --question-key "$MAXOPS_RUN_ID:question:001"
+node scripts/maxops.mjs status-request --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --from '待处理' --to '进行中' --detail '已读取任务并开始执行。' --key "$MAXOPS_RUN_ID:status-request:001"
 node scripts/maxops.mjs inbox --run "$MAXOPS_RUN_ID"
 node scripts/maxops.mjs ack --run "$MAXOPS_RUN_ID" --message amsg_... --key "$MAXOPS_RUN_ID:ack:amsg_..."
-node scripts/maxops.mjs finish --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '已交付' --detail '说明验证结果。' --artifact 'https://example.com/result' --artifact-key "$MAXOPS_RUN_ID:artifact:001" --finish-key "$MAXOPS_RUN_ID:finish:001"
+node scripts/maxops.mjs finish --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '已交付' --detail '说明验证结果。' --artifact 'https://example.com/result' --artifact-key "$MAXOPS_RUN_ID:artifact:001" --finish-key "$MAXOPS_RUN_ID:finish:001"
 ```
 
-Set `MAXOPS_RUN_ID` internally to the `connect` result or keep passing `--run`; do not ask the user to do this wiring. Use `--agent-id` and `--agent-name` only for non-secret identity configuration. Reuse an idempotency key only when retrying the exact same logical mutation after an unknown outcome.
+Set `MAXOPS_TASK_ID` and `MAXOPS_RUN_ID` internally from the `connect` result; do not ask the user to do this wiring. Keep `MAXOPS_RECORD_ID` as the supplied read scope. Use `--agent-id` and `--agent-name` only for non-secret identity configuration. Reuse an idempotency key only when retrying the exact same logical mutation after an unknown outcome.
 
 Use `status-request` only to propose a visible before/after change through the existing questions API. It sends Max a request; it does not create a Gate or update Feishu by itself. Max must confirm and perform the status change through the existing MAX OPS / Feishu Gate. After Max replies, poll `inbox`, apply the confirmed instruction inside scope, and `ack` it.
 

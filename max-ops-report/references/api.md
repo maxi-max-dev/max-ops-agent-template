@@ -18,13 +18,13 @@ Supply the authorized Agent-API deployment with `MAXOPS_URL` or CLI `--url`. The
 
 Every mutation requires a 12–200 character `Idempotency-Key`. Reuse a key only when retrying the same logical action after an uncertain network outcome.
 
-`connect` performs no mutation. It validates the bundled manifest, calls authenticated `health`, reads exactly the supplied `record_id`, and returns a session containing the `run_id` to retain. A successful `connect` does not prove Feishu state writeback.
+`connect` performs no mutation. It validates the bundled manifest, calls authenticated `health`, reads exactly the supplied `record_id`, and returns a session containing the returned `task_id`, confirmed `record_id`, and `run_id` to retain. A successful `connect` does not prove Feishu state writeback.
 
 `status-request` creates an Agent question only. It does not create a pending Gate command. Max must confirm and perform any five-state change through the existing MAX OPS / Feishu Gate, then answer the Agent through the inbox path.
 
 Task reads require a Base record ID supplied by the user. They return a whitelisted project/task projection, never raw Feishu fields, notes, credentials, or a full-board listing.
 
-Required event fields are `agent_id`, `agent_name`, `run_id`, `task_id`, `kind`, `state`, `title`, and `detail`. Optional artifact URLs must use HTTP(S) and contain no secrets.
+Required event fields are `agent_id`, `agent_name`, `run_id`, `task_id`, `kind`, `state`, `title`, and `detail`. Send the `record_id` returned by `connect` as well; it is required whenever `record_id` and `task_id` differ. Optional artifact URLs must use HTTP(S) and contain no secrets.
 
 HTTP handling:
 

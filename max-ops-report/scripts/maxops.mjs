@@ -90,11 +90,14 @@ async function request(ctx, path, { method = "GET", body, key, dryRun = false } 
 }
 
 function eventBody(ctx, options, kind, state) {
+  const taskId = required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID");
+  const recordId = options.record || process.env.MAXOPS_RECORD_ID || taskId;
   return {
     agent_id: ctx.agentId,
     agent_name: ctx.agentName,
     run_id: ctx.runId,
-    task_id: required(options.task, "--task"),
+    task_id: taskId,
+    record_id: recordId,
     kind,
     state,
     title: required(options.title, "--title"),
@@ -127,7 +130,7 @@ async function run(argv) {
       next: !urlConfigured
         ? "Set MAXOPS_URL or pass --url for the authorized MAX OPS deployment."
         : tokenConfigured
-          ? "Run: node scripts/maxops.mjs connect --task <record_id>"
+          ? "Run: node scripts/maxops.mjs connect --record <record_id>"
           : "Inject MAXOPS_AGENT_TOKEN through the runtime environment or secret manager; never paste it into chat or a command argument.",
     };
   }
@@ -141,10 +144,17 @@ async function run(argv) {
   }
   if (command === "connect") {
     const ctx = context(options, false);
-    const taskId = required(options.task, "--task");
+    const recordId = required(options.record || options.task || process.env.MAXOPS_RECORD_ID, "--record or MAXOPS_RECORD_ID");
     const manifest = await loadAndValidateManifest();
     const health = await request(ctx, "/api/agent/v1/health", { dryRun: options.dryRun });
-    const task = await request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(taskId)}`, { dryRun: options.dryRun });
+    const task = await request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(recordId)}`, { dryRun: options.dryRun });
+    const returnedTaskId = options.dryRun
+      ? recordId
+      : required(task?.task?.task_id, "task.task_id in the scoped task response");
+    const returnedRecordId = options.dryRun
+      ? recordId
+      : required(task?.task?.record_id, "task.record_id in the scoped task response");
+    if (returnedRecordId !== recordId) throw new Error("Scoped task response record_id does not match the requested record_id.");
     const runId = options.run || process.env.MAXOPS_RUN_ID || `${ctx.agentId}:${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}:${randomUUID().slice(0, 8)}`;
     return {
       ok: true,
@@ -152,18 +162,19 @@ async function run(argv) {
       checks: { manifest: "passed", health },
       task,
       session: {
-        task_id: taskId,
+        task_id: returnedTaskId,
+        record_id: returnedRecordId,
         agent_id: ctx.agentId,
         agent_name: ctx.agentName,
         run_id: runId,
-        instruction: "Retain this run_id and pass it with --run for every lifecycle, inbox, and ack command in this execution.",
+        instruction: "Retain record_id, task_id, and run_id. Pass task_id with --task, record_id with --record, and run_id with --run for every lifecycle command in this execution.",
       },
     };
   }
   if (command === "task") {
     const ctx = context(options, false);
-    const taskId = required(options.task, "--task");
-    return request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(taskId)}`, { dryRun: options.dryRun });
+    const recordId = required(options.record || options.task || process.env.MAXOPS_RECORD_ID, "--record or MAXOPS_RECORD_ID");
+    return request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(recordId)}`, { dryRun: options.dryRun });
   }
 
   const ctx = context(options);
@@ -178,13 +189,16 @@ async function run(argv) {
       method: "POST", key: questionKey, dryRun: options.dryRun,
       body: {
         agent_id: ctx.agentId, agent_name: ctx.agentName, run_id: ctx.runId,
-        task_id: required(options.task, "--task"), question: options.question,
+        task_id: required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID"),
+        record_id: options.record || process.env.MAXOPS_RECORD_ID || required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID"),
+        question: options.question,
       },
     });
     return { event, question };
   }
   if (command === "status-request") {
-    const taskId = required(options.task, "--task");
+    const taskId = required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID");
+    const recordId = options.record || process.env.MAXOPS_RECORD_ID || taskId;
     const fromStatus = required(options.from, "--from");
     const toStatus = required(options.to, "--to");
     const detail = required(options.detail, "--detail");
@@ -196,6 +210,7 @@ async function run(argv) {
         agent_name: ctx.agentName,
         run_id: ctx.runId,
         task_id: taskId,
+        record_id: recordId,
         question: `状态更新提议（Agent 不直接写入飞书）：${fromStatus} → ${toStatus}。${detail} 请由 Max 通过 Gate 确认或拒绝。`,
       },
     });

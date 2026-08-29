@@ -6,6 +6,7 @@ This adapter connects one explicitly authorized Agent run to one MAX OPS task. C
 
 - Use a stable, configurable `agent_id` and readable `agent_name`.
 - Require a `record_id` supplied by Max. Never infer it from a title.
+- Preserve both the returned `task_id` and the supplied `record_id`; lifecycle mutations must send the pair and must not assume they are equal.
 - Read only that task projection. Never enumerate the Feishu board.
 - Keep one stable `run_id` for the execution.
 
