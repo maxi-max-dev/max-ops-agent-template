@@ -1,76 +1,107 @@
 {
-  "schema_version": "maxops-adapter/1",
-  "adapter_id": "codex-reference",
-  "display_name": "Codex reference adapter",
-  "reference_runtime": "Codex",
+  "schema_version": "maxops-agent-connector/2",
+  "connector_id": "user-feishu-template",
+  "display_name": "MAX OPS Agent Connector",
   "runtime_neutral": true,
   "contract": "references/adapter-contract.md",
-  "capabilities": [
-    "connect",
-    "read_scoped_task",
-    "report_lifecycle",
-    "ask_question",
-    "propose_status",
-    "deliver_artifact",
-    "receive_inbox",
-    "acknowledge_message",
-    "preserve_receipt"
-  ],
-  "identity": {
-    "configurable": true,
-    "agent_id": {
-      "environment": "MAXOPS_AGENT_ID",
-      "cli": "--agent-id",
-      "default": "codex"
+  "default_adapter": null,
+  "product_routing": {
+    "default_route": "feishu_base_direct",
+    "explicit_adapter_selection_required": true,
+    "feishu_base_direct": "cross_plan_full_route",
+    "webhook_write": "capability_dependent_optional"
+  },
+  "adapters": {
+    "webhook_write": {
+      "mode": "write_only",
+      "availability": "capability_dependent_optional",
+      "capabilities": ["start", "progress", "blocked", "question", "artifact", "finish"],
+      "cannot": ["read_task", "read_feedback", "acknowledge", "read_receipt"],
+      "required_environment": ["MAXOPS_WEBHOOK_URL", "MAXOPS_WEBHOOK_TOKEN"],
+      "native_feishu_receiver": {
+        "requires_base_plan_webhook_trigger": true,
+        "trigger_label": "接收到 Webhook 时",
+        "must_confirm_before_selection": true,
+        "template_copy_guarantees_endpoint_token": false,
+        "missing_endpoint_state": "not_connected",
+        "message_or_form_fallback": false
+      }
     },
-    "agent_name": {
-      "environment": "MAXOPS_AGENT_NAME",
-      "cli": "--agent-name",
-      "default": "Codex"
+    "feishu_base_direct": {
+      "mode": "full",
+      "availability": "cross_plan_full_route",
+      "capabilities": ["read_task", "start", "progress", "blocked", "question", "artifact", "finish", "inbox", "ack", "receipt"],
+      "required_environment": [
+        "MAXOPS_FEISHU_APP_ID",
+        "MAXOPS_FEISHU_APP_SECRET",
+        "MAXOPS_FEISHU_APP_TOKEN",
+        "MAXOPS_FEISHU_TASKS_TABLE_ID",
+        "MAXOPS_FEISHU_EVENTS_TABLE_ID",
+        "MAXOPS_FEISHU_FEEDBACK_TABLE_ID",
+        "MAXOPS_FEISHU_RECEIPTS_TABLE_ID"
+      ]
     }
   },
-  "task_scope": {
-    "mode": "single_explicit_record",
-    "requires_user_supplied_record_id": true,
-    "board_enumeration": false,
-    "title_inference": false
+  "common_environment": ["MAXOPS_ADAPTER", "MAXOPS_INSTANCE_ID", "MAXOPS_AGENT_ID", "MAXOPS_AGENT_NAME"],
+  "event_semantics": {
+    "start": { "kind": "run_started", "state": "running" },
+    "progress": { "kind": "progress", "state": "running" },
+    "blocked": { "kind": "blocked", "state": "blocked" },
+    "question": { "kind": "question", "state": "blocked" },
+    "artifact": { "kind": "artifact", "state": "done", "status": "pending_review" },
+    "finish": { "kind": "run_finished", "state": "done" }
   },
-  "operations": {
-    "connect": "node scripts/maxops.mjs connect --url <maxops_url> --record <record_id>",
-    "read": "node scripts/maxops.mjs task --record <record_id>",
-    "start": "node scripts/maxops.mjs start --task <task_id> --record <record_id> --title <text> --detail <text>",
-    "progress": "node scripts/maxops.mjs progress --task <task_id> --record <record_id> --title <text> --detail <text>",
-    "blocker": "node scripts/maxops.mjs blocked --task <task_id> --record <record_id> --title <text> --detail <text>",
-    "question": "node scripts/maxops.mjs blocked --task <task_id> --record <record_id> --title <text> --detail <text> --question <text>",
-    "status_request": "node scripts/maxops.mjs status-request --task <task_id> --record <record_id> --from <current_status> --to <proposed_status> --detail <reason>",
-    "artifact": "node scripts/maxops.mjs artifact --task <task_id> --record <record_id> --title <text> --detail <text> --artifact <https-url>",
-    "finish": "node scripts/maxops.mjs finish --task <task_id> --record <record_id> --title <text> --detail <text>",
-    "inbox": "node scripts/maxops.mjs inbox",
-    "ack": "node scripts/maxops.mjs ack --message <message_id>",
-    "receipt": "preserve receipt_id returned by event, question, instruction, and acknowledgement responses"
+  "identity": {
+    "copy_scope": "MAXOPS_INSTANCE_ID",
+    "task_scope": "one explicit logical task_id",
+    "record_id_required": false,
+    "title_inference": false,
+    "board_enumeration": false,
+    "agent_status_write": false
+  },
+  "machine_fields": [
+    "instance_id", "task_id", "event_id", "idempotency_key", "payload_digest",
+    "agent_id", "agent_name", "run_id", "kind", "state", "title", "detail",
+    "artifact_url", "occurred_at", "message_id", "body", "reply", "status",
+    "created_at", "replied_at", "receipt_id", "receipt", "submitted_at", "acknowledged_at"
+  ],
+  "status_enums": {
+    "feedback": ["open", "replied", "processing", "resolved"],
+    "receipt_ack": ["acknowledged"],
+    "artifact_review": ["pending_review", "approved", "changes_requested"],
+    "connector_dependencies": {
+      "inbox_reads": "replied",
+      "ack_receipt_writes": "acknowledged",
+      "artifact_initial_write": "pending_review"
+    },
+    "localized_values_in_machine_status": false
+  },
+  "time_serialization": {
+    "public_event_occurred_at": "iso8601_string_with_timezone",
+    "webhook_write_event_occurred_at": "unchanged_iso8601_string",
+    "feishu_base_direct_occurred_at": "epoch_milliseconds_number",
+    "feishu_base_direct_submitted_at": "epoch_milliseconds_number",
+    "feishu_base_direct_acknowledged_at": "epoch_milliseconds_number",
+    "invalid_time_fallback": false
   },
   "authentication": {
-    "scheme": "bearer",
-    "secret_environment": "MAXOPS_AGENT_TOKEN",
-    "secret_cli_argument": false,
-    "reject_secret_in_url_or_body": true,
-    "secret_must_not_enter_chat_or_artifacts": true
-  },
-  "onboarding": {
-    "command": "node scripts/maxops.mjs connect --url <maxops_url> --record <record_id>",
-    "sequence": ["validate_manifest", "authenticated_health", "read_scoped_task", "return_stable_run_id"],
-    "mutates_remote_state": false
+    "environment_or_secret_store_only": true,
+    "secret_cli_arguments": false,
+    "secret_in_template_fields": false,
+    "secret_in_urls": false,
+    "secret_in_logs_or_results": false,
+    "secret_in_repository": false
   },
   "idempotency": {
-    "required_for_mutations": true,
-    "key_length": "12..200",
-    "reuse_only_for_same_logical_action": true,
-    "retry_unknown_outcome_with_same_key": true
+    "required_for_every_mutation": true,
+    "scope": ["instance_id", "idempotency_key"],
+    "same_key_same_payload_is_replay": true,
+    "same_key_different_payload_is_conflict": true
   },
-  "source_of_truth": {
-    "feishu_five_state_owner": "Max / confirmed MAX OPS Gate",
-    "agent_direct_status_write": false,
-    "private_feishu_credentials": false
+  "failure_mode": {
+    "missing_configuration": "not_connected",
+    "preview_fallback": false,
+    "simulated_success": false
   },
-  "self_check": "node scripts/validate-adapter.mjs && node scripts/self-test.mjs"
+  "self_check": "npm run validate && npm test && npm run lint"
 }

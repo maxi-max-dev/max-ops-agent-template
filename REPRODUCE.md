@@ -1,78 +1,67 @@
-# 第一次使用 PairDesk / MAX OPS Agent Adapter
+# MAX OPS Agent Connector 复现与验收
 
-这页给评委和第一次接触的人看。你不需要 Max 的私人数据，也不需要飞书凭据，就能先确认公开 Adapter 是否完整。
+本仓库的目标是让每个用户连接自己的飞书模板副本。公开自检不需要账号；真实连接只使用该用户本地注入的配置和凭据。
 
-PairDesk 是比赛原型工作名。当前生产和 UI 仍叫 MAX OPS。
-
-## 先选你要验证哪一层
-
-- A，公开自检：任何人都能 clone 仓库，验证 Adapter manifest、客户端和模拟生命周期。无需账号、token、飞书或 MAX OPS 服务。
-- B，实现合同：任意 Agent 可以按公开 manifest 和 contract 为自己实现 Adapter，并用 validator/self-test 验证；本轮还没有完成独立第三方 Adapter 的实机接入。
-- C，真实任务：需要任务拥有者提供受控 `MAXOPS_URL`、一条演示任务的 `record_id`，并把受限 token 安全注入运行环境。
-- D，完全一键接入：陌生人自己注册、自动拿 token、自动绑定 workspace 和任务作用域。当前没有实现。
-
-本仓库现在可以直接验证 A，也给出了 B 的合同与工具。C 需要拥有者邀请；D 是后续产品能力。
-
-## 1 分钟公开自检
-
-本轮已验证环境：Git 与 Node.js 22。其他 Node.js 版本需要在各自环境中重新运行下面两条自检。
+## A. 离线合同验收
 
 ```bash
-git clone https://github.com/maxi-max-dev/max-ops-agent-template.git
-cd max-ops-agent-template/max-ops-report
-node scripts/validate-adapter.mjs
-node scripts/self-test.mjs
+git clone <this-repository>
+cd max-ops-agent-template
+npm run validate
+npm test
+npm run lint
 ```
 
-成功时你会看到：
+预期结果：
 
-- manifest 通过，包含 read、start、progress、blocker、question、artifact、finish、inbox、ack 和 receipt。
-- 非 Codex 的稳定 `agent_id` 也能完成模拟生命周期。
-- question、回复、inbox、ack 和 receipt 能在模拟服务中连起来。
-- 没有网络请求、真实飞书写入或私人数据读取。
+- manifest 同时声明 `webhook_write` 和 `feishu_base_direct`，且没有默认 adapter。
+- 缺配置明确得到 `not_connected`，无 PREVIEW 或模拟成功。
+- 两个 `instance_id` 即使复用同一个 task ID 和 idempotency key 也互相隔离。
+- 同副本重放相同 key 不重复写入；变更 payload 后复用 key 会冲突。
+- 错误 task identity 在写事件之前被拒绝。
+- 完整模式可在 fixture 中走完 `start → progress → blocked/question → reply → inbox → ack/receipt → artifact → finish`。
+- 中文 `已回复` 不会被误当成机器状态；只有精确 `status=replied` 才进入 inbox，ack 与 artifact 分别断言 `acknowledged`、`pending_review`。
+- Direct fixture 断言 `occurred_at`、`submitted_at`、`acknowledged_at` 为正确的 epoch-milliseconds number；webhook fixture 断言公开事件仍是原始 ISO 字符串；非法日期在发起网络请求前失败。
 
-这一步证明的是公开 Adapter 客户端和合同，不是生产飞书已经连接。
+这一步不证明任何真实飞书副本已经连接。
 
-## 拥有者授权的真实连接
+## B. 新副本实例化
 
-任务拥有者先在自己的测试 Base 里准备一条完全虚构的演示任务，然后给使用者两项普通信息：
+1. 复制用户自己的飞书模板。
+2. 给副本设置新的 `instance_id`，不要沿用另一个副本的值。
+3. 检查任务、事件、反馈、回执表的机器字段；以 `max-ops-report/references/feishu-base-contract.md` 为准。
+4. 默认走跨套餐完整路线 `feishu_base_direct`。只有套餐实际开放原生 webhook trigger 时才选择可选的 `webhook_write`；只在本机环境/secret store 配置连接信息。
+5. 运行 `doctor`。若 `ok: false` 或 `connection_state: not_connected`，停止并补配置。
 
-- `MAXOPS_URL`：明确授权、真正提供 Agent API 的部署地址。
-- `MAXOPS_RECORD_ID`：这条虚构演示任务的 `record_id`。
+## C. `webhook_write` 真实写入验收
 
-受限 `MAXOPS_AGENT_TOKEN` 通过本机环境变量或 secret manager 注入，不能粘贴进聊天、截图、URL 或命令参数。
+1. 先确认该 Base 套餐实际开放原生“接收到 Webhook 时”触发器。若界面提示升级且未生成 endpoint/token，停止：`doctor` 应为 `not_connected`。不要改用飞书消息或表单冒充 webhook。
+2. 在用户自己的飞书环境创建事件写入 webhook/自动化接收器。
+3. 让接收器验证 Bearer token、`instance_id` 和 task allowlist，并按 `(instance_id, idempotency_key)` 去重。
+4. 只有真实生成后才注入 `MAXOPS_WEBHOOK_URL` 与 `MAXOPS_WEBHOOK_TOKEN`，URL 不得携带 secret。
+5. 运行 `doctor`；它只证明配置结构完整，状态仍是 `configured_not_verified`。
+6. 对一个虚构任务写 `start`，确认用户自己的事件表出现且字段身份一致。
+7. 使用相同 key 重放，确认没有第二行；更换错误 task ID，确认接收器拒绝。
 
-```bash
-export MAXOPS_URL='https://the-authorized-maxops-deployment.example'
-export MAXOPS_RECORD_ID='rec...'
-export MAXOPS_AGENT_ID='codex'
-export MAXOPS_AGENT_NAME='Codex'
-read -s MAXOPS_AGENT_TOKEN && export MAXOPS_AGENT_TOKEN
+该模式不应能读取任务、inbox、ack 或 receipt。
 
-node scripts/maxops.mjs connect --url "$MAXOPS_URL" --record "$MAXOPS_RECORD_ID"
-```
+## D. `feishu_base_direct` 完整链路验收
 
-`connect` 只做四件事：验证本地 manifest、检查受控 API、读取指定任务、创建或复用稳定 `run_id`。它会同时返回 `record_id` 和真实 `task_id`；后续命令必须分别保留两者。它不枚举任务板，也不修改飞书五态。
+1. 创建用户自己的飞书企业自建应用，仅授予 `base:record:retrieve` 和 `base:record:create`，发布应用，并把它添加为该 Base 的文档应用/可编辑协作者。
+2. 从本地环境或 secret manager 注入 App ID、App Secret、Base app token 和四张表 ID。
+3. 在任务表建一条虚构任务，确保 `instance_id` 和 `task_id` 唯一。
+4. 运行 `doctor`，再运行 `connect --task <task_id>`。成功应返回逻辑 task ID，不依赖或暴露 Feishu `record_id`。
+5. 用稳定 run ID 写入 start、progress、question。
+6. 人在反馈表对同一个 `instance_id/task_id/agent_id/run_id` 填写 `reply`。
+7. Agent 运行 `inbox`，只接受完整身份一致的消息；再运行 `ack` 并保存 `receipt_id`。
+8. 运行 `receipt` 读回同一回执，再写 artifact 和 finish。
+9. 重放一个已成功 key，确认表中未新增；用另一副本的 `instance_id` 或错误 task ID，确认读取/写入失败。
 
-连接成功后，再按 `max-ops-report/SKILL.md` 报告 start、真实进度、question 或 artifact、finish；有回复时读取 inbox 并 ack。最后的任务状态仍由人确认。
+## E. 安全审计
 
-## 录比赛 Demo 时怎么用假数据
+- `git grep` 不应出现真实 App Secret、webhook token、tenant access token、Base app token 或表 ID。
+- 飞书模板字段、artifact URL、CLI 参数和日志中不得出现凭据。
+- 浏览器/Agent 网络请求只能到用户配置的 webhook 或飞书开放平台，不请求任何 Max 控制的生产域名。
+- Agent 不写任务五态；状态建议只能作为 `question` 事件交给人或飞书工作流处理。
 
-假数据不等于静态截图。安全做法是：
-
-1. 在真实测试 Base 中新建一个虚构 Project 和虚构 Task。
-2. 用上面的 C 级连接读取它。
-3. 现场报告 start/progress/question 或 artifact。
-4. 人在同一任务旁回复。
-5. Agent 读取 inbox、ack，并留下 receipt。
-6. 人确认最终五态，再回飞书检查同一条记录。
-
-这样不暴露个人数据，同时仍然是在真实系统里跑核心过程。
-
-## 当前明确没有的能力
-
-- 本仓库不会自动给陌生人发 MAX OPS URL、token 或任务权限。
-- 静态 PairDesk 网页不是 Agent API。
-- Agent API 不直接改变飞书人工五态。
-- 当前没有聊天创建新 Project/Task 的接口。
-- 公开自检通过不等于某个生产部署或飞书租户已经通过实机验收。
+真实 Base 的字段类型、应用发布状态和文档应用权限必须在用户租户中单独验收；离线 fixture 不能替代这一步。

@@ -1,4 +1,4 @@
 interface:
-  display_name: "MAX OPS Reporter"
-  short_description: "一条命令安全连接任务并回报 MAX OPS"
-  default_prompt: "Use $max-ops-report to connect this explicitly authorized task to its MAX OPS URL, retain one run ID, and report the Agent run with questions, artifacts, acknowledgements, and receipts."
+  display_name: "MAX OPS Agent Connector"
+  short_description: "连接用户自己的飞书模板并安全回报 Agent 生命周期"
+  default_prompt: "Use $max-ops-report with my locally configured webhook_write or feishu_base_direct adapter, fail closed if it is not connected, and report this explicitly scoped task with stable identity and idempotency keys."

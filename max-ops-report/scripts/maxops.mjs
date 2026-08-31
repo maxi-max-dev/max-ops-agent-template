@@ -1,251 +1,192 @@
 #!/usr/bin/env node
 
-import { randomUUID } from "node:crypto";
+import { createAdapter } from "../adapters/index.mjs";
+import { createEvent, createRunId, requireIdempotencyKey, requireString, requireTaskId } from "../lib/contract.mjs";
+import { inspectConfiguration, loadConfiguration } from "../lib/config.mjs";
+import { ConfigurationError } from "../lib/errors.mjs";
 import { loadAndValidateManifest } from "./validate-adapter.mjs";
 
-const commands = new Set(["doctor", "connect", "health", "new-run", "task", "start", "progress", "blocked", "status-request", "artifact", "finish", "inbox", "ack"]);
-const forbiddenSecretOptions = new Set(["token", "agent-token", "authorization", "bearer", "app-secret", "base-token"]);
+const commands = new Set([
+  "doctor",
+  "connect",
+  "new-run",
+  "task",
+  "start",
+  "progress",
+  "blocked",
+  "question",
+  "status-request",
+  "artifact",
+  "finish",
+  "inbox",
+  "ack",
+  "receipt",
+]);
+const forbiddenSecretOptions = /(?:token|secret|authorization|bearer|credential|app-id|app-token|table-id|url)/i;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const [command, ...rest] = argv;
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
     const value = rest[index];
-    if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
+    if (!value.startsWith("--")) throw new ConfigurationError("Unexpected positional argument.");
     const key = value.slice(2);
-    if (forbiddenSecretOptions.has(key) || /(?:token|secret|authorization|bearer)/i.test(key)) {
-      throw new Error(`Do not pass secrets with --${key}. Inject MAXOPS_AGENT_TOKEN through the runtime environment or secret manager.`);
-    }
-    if (key === "dry-run") {
-      options.dryRun = true;
-      continue;
+    if (forbiddenSecretOptions.test(key)) {
+      throw new ConfigurationError(`Do not pass connection values with --${key}. Inject them through the local environment or a secret manager.`);
     }
     const next = rest[index + 1];
-    if (!next || next.startsWith("--")) throw new Error(`Missing value for --${key}`);
+    if (!next || next.startsWith("--")) throw new ConfigurationError(`Missing value for --${key}.`);
     options[key.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = next;
     index += 1;
   }
   return { command, options };
 }
 
-function required(value, label) {
-  if (!value) throw new Error(`Missing ${label}`);
-  return value;
-}
-
-function normalizeBaseUrl(value) {
-  if (!value) return "";
-  let parsed;
-  try { parsed = new URL(value); } catch { throw new Error("MAX OPS URL must be an absolute HTTP(S) URL."); }
-  if (!new Set(["http:", "https:"]).has(parsed.protocol)) throw new Error("MAX OPS URL must use HTTP(S).");
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("MAX OPS URL must not contain credentials, query parameters, or fragments.");
-  }
-  return parsed.href.replace(/\/$/, "");
-}
-
-function idempotency(agentId, runId, action, supplied) {
-  return supplied || `${agentId}:${runId}:${action}:${randomUUID()}`;
-}
-
-function context(options, needsRun = true) {
-  const agentId = options.agentId || process.env.MAXOPS_AGENT_ID || "codex";
-  const agentName = options.agentName || process.env.MAXOPS_AGENT_NAME || "Codex";
+function runIdentity(config, options, { needsRun = true, needsTask = true } = {}) {
   const runId = options.run || process.env.MAXOPS_RUN_ID;
+  const taskId = options.task || process.env.MAXOPS_TASK_ID;
   return {
-    baseUrl: normalizeBaseUrl(options.url || process.env.MAXOPS_URL || ""),
-    token: process.env.MAXOPS_AGENT_TOKEN,
-    agentId,
-    agentName,
-    runId: needsRun ? required(runId, "--run or MAXOPS_RUN_ID") : runId,
+    instanceId: config.instanceId,
+    agentId: config.agentId,
+    agentName: config.agentName,
+    runId: needsRun ? requireString(runId, "run identity (--run or MAXOPS_RUN_ID)") : runId,
+    taskId: needsTask ? requireTaskId(taskId) : taskId,
   };
 }
 
-async function request(ctx, path, { method = "GET", body, key, dryRun = false } = {}) {
-  required(ctx.baseUrl, "--url or MAXOPS_URL");
-  const url = `${ctx.baseUrl}${path}`;
-  const serializedBody = body ? JSON.stringify(body) : "";
-  if (ctx.token && (url.includes(ctx.token) || serializedBody.includes(ctx.token))) {
-    throw new Error("Refusing to place MAXOPS_AGENT_TOKEN in a URL or request body.");
-  }
-  if (dryRun) return { dry_run: true, method, url, idempotency_key: key ?? null, body: body ?? null };
-  required(ctx.token, "MAXOPS_AGENT_TOKEN");
-  const headers = { Authorization: `Bearer ${ctx.token}` };
-  if (body) headers["Content-Type"] = "application/json";
-  if (key) headers["Idempotency-Key"] = key;
-  let response;
-  try {
-    response = await fetch(url, { method, headers, body: serializedBody || undefined });
-  } catch (error) {
-    throw new Error(`Network outcome unknown. Retry with the same --key${key ? ` (${key})` : ""}. ${error.message}`);
-  }
-  const text = await response.text();
-  let payload;
-  try { payload = text ? JSON.parse(text) : {}; } catch { payload = { raw: text }; }
-  if (!response.ok) {
-    const retry = response.status >= 500 ? ` Retry with the same --key${key ? ` (${key})` : ""}.` : "";
-    throw new Error(`HTTP ${response.status}: ${payload.error || payload.message || text || response.statusText}.${retry}`);
-  }
-  return payload;
-}
-
-function eventBody(ctx, options, kind, state) {
-  const taskId = required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID");
-  const recordId = options.record || process.env.MAXOPS_RECORD_ID || taskId;
-  return {
-    agent_id: ctx.agentId,
-    agent_name: ctx.agentName,
-    run_id: ctx.runId,
-    task_id: taskId,
-    record_id: recordId,
+function event(config, options, kind, overrides = {}) {
+  return createEvent({
+    ...runIdentity(config, options),
     kind,
-    state,
-    title: required(options.title, "--title"),
-    detail: required(options.detail, "--detail"),
-    ...(options.artifact ? { artifact_url: options.artifact } : {}),
-  };
-}
-
-async function postEvent(ctx, options, kind, state, action = kind) {
-  const key = idempotency(ctx.agentId, ctx.runId, action, options.key);
-  return request(ctx, "/api/agent/v1/events", {
-    method: "POST", body: eventBody(ctx, options, kind, state), key, dryRun: options.dryRun,
+    title: overrides.title ?? options.title,
+    detail: overrides.detail ?? options.detail,
+    artifactUrl: Object.hasOwn(overrides, "artifactUrl") ? overrides.artifactUrl : options.artifact,
   });
 }
 
-async function run(argv) {
+async function write(adapter, connectorEvent, key, label = "idempotency key (--key)") {
+  return adapter.writeEvent(connectorEvent, requireIdempotencyKey(key, label));
+}
+
+export async function run(argv, runtime = {}) {
+  const env = runtime.env || process.env;
   const { command, options } = parseArgs(argv);
-  if (!commands.has(command)) throw new Error("Usage: maxops.mjs <doctor|connect|health|new-run|task|start|progress|blocked|status-request|artifact|finish|inbox|ack> [options]");
+  if (!commands.has(command)) {
+    throw new ConfigurationError("Usage: maxops.mjs <doctor|connect|new-run|task|start|progress|blocked|question|status-request|artifact|finish|inbox|ack|receipt> [options].");
+  }
   if (command === "doctor") {
-    const ctx = context(options, false);
-    const tokenConfigured = Boolean(ctx.token);
-    const urlConfigured = Boolean(ctx.baseUrl);
-    return {
-      ok: tokenConfigured && urlConfigured,
-      maxops_url: ctx.baseUrl || null,
-      agent_id: ctx.agentId,
-      agent_name: ctx.agentName,
-      token_configured: tokenConfigured,
-      url_configured: urlConfigured,
-      next: !urlConfigured
-        ? "Set MAXOPS_URL or pass --url for the authorized MAX OPS deployment."
-        : tokenConfigured
-          ? "Run: node scripts/maxops.mjs connect --record <record_id>"
-          : "Inject MAXOPS_AGENT_TOKEN through the runtime environment or secret manager; never paste it into chat or a command argument.",
-    };
+    const manifest = await loadAndValidateManifest();
+    return { ...inspectConfiguration(env, options.adapter), manifest: "passed", connector: manifest.connector_id };
   }
   if (command === "new-run") {
-    const agentId = options.agentId || process.env.MAXOPS_AGENT_ID || "codex";
-    return `${agentId}:${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}:${randomUUID().slice(0, 8)}`;
+    const agentId = requireString(env.MAXOPS_AGENT_ID, "MAXOPS_AGENT_ID");
+    return createRunId(agentId);
   }
-  if (command === "health") {
-    const ctx = context(options, false);
-    return request(ctx, "/api/agent/v1/health", { dryRun: options.dryRun });
-  }
+
+  const config = loadConfiguration(env, options.adapter);
+  const adapter = createAdapter(config, { fetchImpl: runtime.fetchImpl || globalThis.fetch, now: runtime.now || Date.now });
+  options.task ||= env.MAXOPS_TASK_ID;
+  options.run ||= env.MAXOPS_RUN_ID;
+
   if (command === "connect") {
-    const ctx = context(options, false);
-    const recordId = required(options.record || options.task || process.env.MAXOPS_RECORD_ID, "--record or MAXOPS_RECORD_ID");
-    const manifest = await loadAndValidateManifest();
-    const health = await request(ctx, "/api/agent/v1/health", { dryRun: options.dryRun });
-    const task = await request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(recordId)}`, { dryRun: options.dryRun });
-    const returnedTaskId = options.dryRun
-      ? recordId
-      : required(task?.task?.task_id, "task.task_id in the scoped task response");
-    const returnedRecordId = options.dryRun
-      ? recordId
-      : required(task?.task?.record_id, "task.record_id in the scoped task response");
-    if (returnedRecordId !== recordId) throw new Error("Scoped task response record_id does not match the requested record_id.");
-    const runId = options.run || process.env.MAXOPS_RUN_ID || `${ctx.agentId}:${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}:${randomUUID().slice(0, 8)}`;
+    const taskId = requireTaskId(options.task || env.MAXOPS_TASK_ID);
+    const runId = options.run || env.MAXOPS_RUN_ID || createRunId(config.agentId);
+    if (config.adapter === "webhook_write") {
+      return {
+        ok: true,
+        connected: false,
+        connection_state: "configured_not_verified",
+        adapter: config.adapter,
+        task_id: taskId,
+        run_id: runId,
+        instruction: "This adapter is write-only. A successful start event is the first remote delivery proof; it is not task-read or feedback access.",
+      };
+    }
+    const task = await adapter.readTask(taskId);
     return {
       ok: true,
-      adapter: manifest.adapter_id,
-      checks: { manifest: "passed", health },
+      connected: true,
+      connection_state: "connected",
+      adapter: config.adapter,
       task,
       session: {
-        task_id: returnedTaskId,
-        record_id: returnedRecordId,
-        agent_id: ctx.agentId,
-        agent_name: ctx.agentName,
+        instance_id: config.instanceId,
+        task_id: task.task_id,
+        agent_id: config.agentId,
+        agent_name: config.agentName,
         run_id: runId,
-        instruction: "Retain record_id, task_id, and run_id. Pass task_id with --task, record_id with --record, and run_id with --run for every lifecycle command in this execution.",
       },
     };
   }
   if (command === "task") {
-    const ctx = context(options, false);
-    const recordId = required(options.record || options.task || process.env.MAXOPS_RECORD_ID, "--record or MAXOPS_RECORD_ID");
-    return request(ctx, `/api/agent/v1/tasks/${encodeURIComponent(recordId)}`, { dryRun: options.dryRun });
+    return adapter.readTask(requireTaskId(options.task || env.MAXOPS_TASK_ID));
   }
 
-  const ctx = context(options);
-  if (command === "start") return postEvent(ctx, options, "run_started", "running");
-  if (command === "progress") return postEvent(ctx, options, "progress", "running");
-  if (command === "artifact") return postEvent(ctx, options, "artifact", "done");
+  if (command === "start") return write(adapter, event(config, options, "run_started"), options.key);
+  if (command === "progress") return write(adapter, event(config, options, "progress"), options.key);
+  if (command === "artifact") return write(adapter, event(config, options, "artifact"), options.key);
+  if (command === "question") return write(adapter, event(config, options, "question"), options.key);
   if (command === "blocked") {
-    const event = await postEvent(ctx, options, "blocked", "blocked", "blocked");
-    if (!options.question) return { event };
-    const questionKey = idempotency(ctx.agentId, ctx.runId, "question", options.questionKey);
-    const question = await request(ctx, "/api/agent/v1/questions", {
-      method: "POST", key: questionKey, dryRun: options.dryRun,
-      body: {
-        agent_id: ctx.agentId, agent_name: ctx.agentName, run_id: ctx.runId,
-        task_id: required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID"),
-        record_id: options.record || process.env.MAXOPS_RECORD_ID || required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID"),
-        question: options.question,
-      },
+    const blocked = await write(adapter, event(config, options, "blocked"), options.key);
+    if (!options.question) return { blocked };
+    const questionEvent = event(config, options, "question", {
+      title: options.questionTitle || options.title,
+      detail: options.question,
+      artifactUrl: undefined,
     });
-    return { event, question };
+    const question = await write(adapter, questionEvent, options.questionKey, "question idempotency key (--question-key)");
+    return { blocked, question };
   }
   if (command === "status-request") {
-    const taskId = required(options.task || process.env.MAXOPS_TASK_ID, "--task or MAXOPS_TASK_ID");
-    const recordId = options.record || process.env.MAXOPS_RECORD_ID || taskId;
-    const fromStatus = required(options.from, "--from");
-    const toStatus = required(options.to, "--to");
-    const detail = required(options.detail, "--detail");
-    const questionKey = idempotency(ctx.agentId, ctx.runId, "status-request", options.key);
-    return request(ctx, "/api/agent/v1/questions", {
-      method: "POST", key: questionKey, dryRun: options.dryRun,
-      body: {
-        agent_id: ctx.agentId,
-        agent_name: ctx.agentName,
-        run_id: ctx.runId,
-        task_id: taskId,
-        record_id: recordId,
-        question: `状态更新提议（Agent 不直接写入飞书）：${fromStatus} → ${toStatus}。${detail} 请由 Max 通过 Gate 确认或拒绝。`,
-      },
+    const fromStatus = requireString(options.from, "--from");
+    const toStatus = requireString(options.to, "--to");
+    const reason = requireString(options.detail, "--detail");
+    const proposal = event(config, options, "question", {
+      title: options.title || "Task status proposal",
+      detail: `Agent proposal only: ${fromStatus} → ${toStatus}. ${reason} A human or Feishu workflow must confirm the task-state change.`,
+      artifactUrl: undefined,
     });
+    return write(adapter, proposal, options.key);
   }
   if (command === "finish") {
     const results = [];
     if (options.artifact) {
-      const artifactOptions = { ...options, key: options.artifactKey || (options.key ? `${options.key}:artifact` : undefined) };
-      results.push(await postEvent(ctx, artifactOptions, "artifact", "done", "artifact"));
+      results.push(await write(
+        adapter,
+        event(config, options, "artifact"),
+        options.artifactKey,
+        "artifact idempotency key (--artifact-key)",
+      ));
     }
-    const finishOptions = { ...options, artifact: undefined, key: options.finishKey || (options.artifact && options.key ? `${options.key}:finish` : options.key) };
-    results.push(await postEvent(ctx, finishOptions, "run_finished", "done", "finish"));
+    results.push(await write(
+      adapter,
+      event(config, options, "run_finished", { artifactUrl: undefined }),
+      options.finishKey || (!options.artifact ? options.key : undefined),
+      options.artifact ? "finish idempotency key (--finish-key)" : "idempotency key (--key)",
+    ));
     return { results };
   }
   if (command === "inbox") {
-    const query = new URLSearchParams({ agent_id: ctx.agentId, run_id: ctx.runId });
-    return request(ctx, `/api/agent/v1/inbox?${query}`, { dryRun: options.dryRun });
+    const identity = runIdentity(config, options);
+    return adapter.inbox(identity);
   }
   if (command === "ack") {
-    const messageId = required(options.message, "--message");
-    const key = idempotency(ctx.agentId, ctx.runId, `ack:${messageId}`, options.key);
-    return request(ctx, `/api/agent/v1/messages/${encodeURIComponent(messageId)}/receipts`, {
-      method: "POST", key, dryRun: options.dryRun,
-      body: { agent_id: ctx.agentId, kind: options.kind || "acknowledged" },
-    });
+    const identity = runIdentity(config, options);
+    return adapter.acknowledge({ ...identity, messageId: options.message, key: options.key });
   }
+  if (command === "receipt") {
+    const identity = runIdentity(config, options);
+    return adapter.readReceipt({ ...identity, receiptId: options.receipt });
+  }
+  throw new ConfigurationError(`Command is not implemented: ${command}.`);
 }
-
-export { parseArgs, run };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   run(process.argv.slice(2))
     .then((result) => process.stdout.write(`${typeof result === "string" ? result : JSON.stringify(result, null, 2)}\n`))
     .catch((error) => {
-      process.stderr.write(`MAX OPS Reporter: ${error.message}\n`);
+      const payload = { ok: false, connection_state: error.code === "NOT_CONNECTED" ? "not_connected" : "failed", error: error.code || "CONNECTOR_ERROR", message: error.message };
+      process.stderr.write(`${JSON.stringify(payload)}\n`);
       process.exitCode = 1;
     });
 }

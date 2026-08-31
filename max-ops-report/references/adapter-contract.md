@@ -1,39 +1,84 @@
-# MAX OPS Agent Adapter Contract v1
+# MAX OPS Agent Connector Contract v2
 
-This adapter connects one explicitly authorized Agent run to one MAX OPS task. Codex is the first reference runtime; the protocol is not Codex-specific.
+This contract connects one Agent run to one logical task inside one user-owned Feishu template copy. It is runtime-neutral and has no hosted default.
 
-## Required identity and scope
+The product's cross-plan full default route is `feishu_base_direct`; `webhook_write` is capability-dependent and optional. Runtime configuration must still select an adapter explicitly, so “default route” never means silent fallback or simulated connection.
 
-- Use a stable, configurable `agent_id` and readable `agent_name`.
-- Require a `record_id` supplied by Max. Never infer it from a title.
-- Preserve both the returned `task_id` and the supplied `record_id`; lifecycle mutations must send the pair and must not assume they are equal.
-- Read only that task projection. Never enumerate the Feishu board.
-- Keep one stable `run_id` for the execution.
+## Adapter interface
 
-## Required operations
+An adapter receives validated local configuration and implements:
 
-Every manifest declares `read`, `start`, `progress`, `blocker`, `question`, `artifact`, `finish`, `inbox`, `ack`, and `receipt`.
+```text
+writeEvent(event, idempotencyKey) -> delivery/receipt result
+readTask(taskId)                 -> one whitelisted task       [full mode]
+inbox(identity)                  -> matching feedback messages [full mode]
+acknowledge(identity, messageId, idempotencyKey) -> receipt    [full mode]
+readReceipt(identity, receiptId) -> one receipt                [full mode]
+```
 
-Events, questions, replies, acknowledgements, and receipts stay tied to the same task, Agent, and run. Progress means a meaningful work change, not “online”. An artifact URL must be HTTP(S) and must not carry secrets.
+`webhook_write` implements only `writeEvent`. `feishu_base_direct` implements the full interface. Calling an unavailable method must fail with `UNSUPPORTED_OPERATION`; it must never return empty simulated data.
 
-The reference adapter may expose a read-only `connect` bootstrap before those operations. It must validate its manifest, authenticate against health, read only the supplied task, and return one stable `run_id`. It must not create a project/task or mutate Feishu state. A static Demo that lacks the Agent API cannot pass this check.
+For a native Feishu receiver, the copied Base plan must expose the `接收到 Webhook 时` trigger. If it does not generate a new endpoint/token, `webhook_write` remains `not_connected`; messages, forms, and bot hooks are not compatible fallbacks for this adapter contract.
 
-An adapter may also expose `status-request` as client-side syntax over the existing questions endpoint. State the visible before/after and reason, label it as an Agent proposal, and ask Max to use the separate MAX OPS / Feishu Gate. The question does not create that Gate and is not a direct status-write capability.
+## Identity and isolation
 
-## Idempotency and retries
+Every operation is scoped by a user-generated `instance_id`. Task reads and full-mode mutations additionally require one explicit logical `task_id`. Feedback and receipts require the full tuple:
 
-Every mutation uses a 12–200 character idempotency key. Reuse a key only for the exact same action after a timeout, network error, or `5xx`. Stop and fix the request on `400`, `401`, `404`, or `409`.
+```text
+instance_id + task_id + agent_id + run_id
+```
 
-Accept the Agent token only from the runtime environment or secret manager. Never accept it as a CLI argument, request it in chat, or place it in shell history, URLs, logs, artifacts, or receipts. The adapter never needs a Feishu app secret or Base token.
+Do not infer tasks from titles, enumerate the task table, or require/expose Feishu `record_id`. An empty, multiple, or mismatched result is `TASK_IDENTITY_MISMATCH`.
 
-## Feishu source-of-truth boundary
+The stable machine fields are:
 
-The Agent API records collaboration evidence. It does not directly change the Feishu five-state task fields. Max, the MAX OPS UI, or a confirmed Gate owns those writes. Never use private Feishu credentials or call a Feishu status-write endpoint from an adapter. A receipt proves that an event or message was stored; it does not prove the task state changed.
+```text
+instance_id, task_id, event_id, idempotency_key, payload_digest,
+agent_id, agent_name, run_id, kind, state, title, detail, artifact_url,
+occurred_at, message_id, body, reply, status, created_at, replied_at,
+receipt_id, receipt, submitted_at, acknowledged_at
+```
 
-## Acceptance levels
+Human-facing task columns default to `任务名` and `五态` and may be remapped locally.
 
-1. `node scripts/validate-adapter.mjs` proves the manifest contains the required declarations.
-2. `node scripts/self-test.mjs` proves the zero-dependency CLI can construct every required action for a non-Codex identity without production access.
-3. Only a real authorized Feishu task can prove the FEISHU LIVE chain: task read → start/progress/question or artifact → Max reply → inbox → ack/receipt → synchronized overview.
+The machine `status` field uses exact language-neutral enums: feedback `open/replied/processing/resolved`, receipt ack `acknowledged`, and artifact review `pending_review/approved/changes_requested`. The Connector reads only `replied`, writes ack `acknowledged`, and initializes artifacts as `pending_review`. Localized values belong in separate display columns.
 
-The canonical product-side contract lives in the public `max-ops-agent-control` repository as `ADAPTER-CONTRACT.md`.
+## Event semantics
+
+| CLI operation | `kind` | `state` |
+|---|---|---|
+| `start` | `run_started` | `running` |
+| `progress` | `progress` | `running` |
+| `blocked` | `blocked` | `blocked` |
+| `question` | `question` | `blocked` |
+| `artifact` | `artifact` | `done` |
+| `finish` | `run_finished` | `done` |
+
+`blocked --question` writes two separately idempotent events. `status-request` maps to a `question` event and does not write the task five-state field. An artifact URL must be HTTP(S) without credentials, query parameters, or fragments.
+
+## Time serialization
+
+The public `maxops-agent-event/1` envelope represents `occurred_at` as an ISO-8601 string with an explicit timezone. `webhook_write` sends that string unchanged.
+
+Only `feishu_base_direct` performs storage serialization: it validates `event.occurred_at` and writes a finite epoch-milliseconds number to the Base `occurred_at` date-time field. Receipt `submitted_at` and `acknowledged_at` are also epoch-milliseconds numbers and receive the same clock value. Invalid time is a closed `INVALID_TIME` failure; the adapter must not substitute the current time for an invalid event timestamp.
+
+## Idempotency
+
+Every mutation requires a 12–200 character key. Its scope is `(instance_id, idempotency_key)`.
+
+- Same key and same semantic payload: return the existing delivery/receipt and do not create a row.
+- Same key and different payload or identity: fail `IDEMPOTENCY_CONFLICT` or `TASK_IDENTITY_MISMATCH`.
+- Timeout, network error, or `5xx`: retry the same logical mutation with the same key.
+- Validation, authentication, identity, or conflict error: fix the cause; do not generate a new key to bypass it.
+
+The direct adapter serializes same-process attempts and checks Base before create. A deployment with concurrent writers on different machines needs the webhook receiver or optional Runtime Pack to provide an atomic idempotency store; this client does not pretend Feishu Base offers a uniqueness constraint.
+
+## Credential boundary and failure state
+
+Credentials and connection identifiers come only from the local environment or secret manager. The CLI rejects credential-bearing arguments. App secrets and access tokens must not enter template fields, URLs, logs, results, snapshots, artifacts, or the repository.
+
+No adapter is selected by default. Missing or invalid configuration is `connection_state: not_connected`; there is no PREVIEW fallback or simulated success.
+
+## Source of truth
+
+Agent events, feedback, and receipts are collaboration evidence. A delivery receipt proves that a write was accepted or stored; it does not prove the task's five-state field changed. That field belongs to a human or Feishu workflow.

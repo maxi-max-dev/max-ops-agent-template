@@ -1,0 +1,15 @@
+{
+  "name": "max-ops-agent-connector",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate": "node max-ops-report/scripts/validate-adapter.mjs",
+    "test": "node --test max-ops-report/tests/*.test.mjs",
+    "self-test": "node max-ops-report/scripts/self-test.mjs",
+    "lint": "node max-ops-report/scripts/lint.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

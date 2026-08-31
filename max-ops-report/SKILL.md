@@ -1,73 +1,54 @@
 ---
 name: max-ops-report
-description: Connect an explicitly authorized AI Agent to MAX OPS so it can read one scoped Feishu task and report start, meaningful progress, blockers, questions, artifacts, completion, inbox delivery, and acknowledgement. Use when a user shares this template, invokes $max-ops-report, asks to sync/report work into MAX OPS, or supplies a MAX OPS/Feishu task record ID. Do not use for ordinary tasks or silently enroll work.
+description: Connect an explicitly authorized Agent run to the user's own MAX OPS Feishu template copy through webhook_write or feishu_base_direct, then report lifecycle events and, in full mode, process feedback acknowledgements and receipts.
 ---
 
-# MAX OPS Reporter
+# MAX OPS Agent Connector
 
-Use the bundled zero-dependency CLI. Keep Max, Codex, Claude Code, OpenClaw, and future Agents inside the same task and receipt model.
+Use the bundled zero-dependency CLI. Never assume a hosted endpoint or shared credential exists.
 
 ## Start safely
 
-1. Require an authorized MAX OPS URL and real task `record_id` supplied by the user. Never infer either from a title.
-2. Require `MAXOPS_AGENT_TOKEN` to be injected by the runtime environment or secret manager. Never ask the user to paste it into chat or pass it as a CLI argument.
-3. From this Skill directory, run one read-only bootstrap:
+1. Use `feishu_base_direct` as the cross-plan full default route. The CLI still requires explicit `MAXOPS_ADAPTER` configuration and never selects one silently.
+2. Select optional `webhook_write` only after confirming the tenant plan exposes `接收到 Webhook 时` and a new copy-owned endpoint/token was actually generated.
+3. Require an explicit logical `task_id` from the user or delegated task. Never infer it from a title and never require a Feishu `record_id`.
+4. Run `node scripts/maxops.mjs doctor`. If it reports `not_connected`, stop the connection attempt and list only the missing environment-variable names. Never claim PREVIEW, FEISHU LIVE, or success.
+5. Accept all credentials and connection identifiers only from the local environment or secret manager. Never ask for them in chat or accept them as CLI arguments.
+6. Keep the configured `instance_id`, logical `task_id`, stable `agent_id`, and one `run_id` for the execution.
+7. For `feishu_base_direct`, run `connect --task <task_id>` and require `connected: true` before mutations. For `webhook_write`, `connect` can only return `configured_not_verified`; the first successful event is write-delivery evidence, not task-read evidence.
+8. Every mutation needs a 12–200 character idempotency key. Reuse it only for the exact same logical action after an unknown outcome.
 
-   ```bash
-   node scripts/maxops.mjs connect --url "$MAXOPS_URL" --record "$MAXOPS_RECORD_ID"
-   ```
+Run `npm run validate && npm test && npm run lint` when installing, changing, or diagnosing this Connector. Those checks are offline.
 
-4. Treat success as proof of four checks only: manifest validation, authenticated API health, one scoped task read, and creation/reuse of one stable `run_id`.
-5. Retain the returned `session.record_id`, `session.task_id`, and `session.run_id`. Pass them with `--record`, `--task`, and `--run` for every later lifecycle command. Do not assume the two task identities are equal. If `connect` is repeated for the same execution, pass that same `--run`.
-6. If the supplied URL is a static Demo and does not expose `/api/agent/v1/health`, stop and explain that it cannot connect Agents. Do not invent an API URL or claim FEISHU LIVE.
+## Adapter boundary
 
-Run `node scripts/self-test.mjs` when installing, changing, or diagnosing the adapter. It is an offline test, not a prerequisite on every ordinary run.
+- `webhook_write` may write `start`, `progress`, `blocked`, `question`, `artifact`, and `finish`. It must not read tasks/feedback or acknowledge messages.
+- A native Feishu webhook receiver requires a Base plan that exposes `接收到 Webhook 时`. If no new endpoint/token was generated, keep the adapter `not_connected`; do not substitute messages, forms, or bot hooks.
+- `feishu_base_direct` uses the user's own Feishu app to read one scoped task, write events, read matching feedback, and write/read acknowledgement receipts.
+- Neither adapter writes the task's five-state field. `status-request` is a `question` event only.
+- Never enumerate the task table. Accept feedback only when `instance_id`, `task_id`, `agent_id`, and `run_id` all match.
+- Treat machine status values as exact: inbox requires `replied`, ack writes `acknowledged`, and artifact starts at `pending_review`. Never substitute localized labels in the machine field.
+- Keep public/webhook `occurred_at` as ISO-8601. The Direct adapter alone serializes Base date-time fields to epoch milliseconds; `INVALID_TIME` is a hard failure and must never fall back to the current time.
 
-## Respect the boundary
-
-- Connect only when the user explicitly supplies a MAX OPS task identity or asks to connect the work.
-- Read only that task identity. Never enumerate the full Feishu board.
-- Never print, log, commit, or embed `MAXOPS_AGENT_TOKEN` in prompts or artifact URLs.
-- Never mutate Feishu task state through the Agent API. Report evidence; Max or the MAX OPS UI owns five-state writeback.
-- Treat message delivery as communication evidence, not proof that work finished.
-
-## Configure the runtime
-
-```bash
-export MAXOPS_URL='https://the-authorized-maxops-deployment.example'
-export MAXOPS_RECORD_ID='rec...'
-export MAXOPS_AGENT_ID='codex'
-export MAXOPS_AGENT_NAME='Codex'
-# MAXOPS_AGENT_TOKEN is already injected by the runtime/secret manager.
-```
-
-Change only the stable Agent identity for another runtime.
-
-## Report the lifecycle
+## Report lifecycle
 
 ```bash
-node scripts/maxops.mjs start --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '开始处理' --detail '已读取任务背景与边界。' --key "$MAXOPS_RUN_ID:start:001"
-node scripts/maxops.mjs progress --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '完成关键步骤' --detail '描述已完成且可验证的变化。' --key "$MAXOPS_RUN_ID:progress:001"
-node scripts/maxops.mjs blocked --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '需要回复' --detail '说明真实阻塞。' --question '写出会改变结果的问题。' --key "$MAXOPS_RUN_ID:blocked:001" --question-key "$MAXOPS_RUN_ID:question:001"
-node scripts/maxops.mjs status-request --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --from '待处理' --to '进行中' --detail '已读取任务并开始执行。' --key "$MAXOPS_RUN_ID:status-request:001"
-node scripts/maxops.mjs inbox --run "$MAXOPS_RUN_ID"
-node scripts/maxops.mjs ack --run "$MAXOPS_RUN_ID" --message amsg_... --key "$MAXOPS_RUN_ID:ack:amsg_..."
-node scripts/maxops.mjs finish --task "$MAXOPS_TASK_ID" --record "$MAXOPS_RECORD_ID" --run "$MAXOPS_RUN_ID" --title '已交付' --detail '说明验证结果。' --artifact 'https://example.com/result' --artifact-key "$MAXOPS_RUN_ID:artifact:001" --finish-key "$MAXOPS_RUN_ID:finish:001"
+node scripts/maxops.mjs start --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '开始处理' --detail '已读取范围并开始执行。' --key "$MAXOPS_RUN_ID:start:001"
+node scripts/maxops.mjs progress --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '完成关键步骤' --detail '描述真实且可验证的变化。' --key "$MAXOPS_RUN_ID:progress:001"
+node scripts/maxops.mjs blocked --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '需要回复' --detail '说明真实阻塞。' --question '写出会改变结果的问题。' --key "$MAXOPS_RUN_ID:blocked:001" --question-key "$MAXOPS_RUN_ID:question:001"
+node scripts/maxops.mjs artifact --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '产物' --detail '说明产物。' --artifact 'https://artifacts.example/result' --key "$MAXOPS_RUN_ID:artifact:001"
+node scripts/maxops.mjs finish --task "$MAXOPS_TASK_ID" --run "$MAXOPS_RUN_ID" --title '已完成' --detail '说明验证结果。' --key "$MAXOPS_RUN_ID:finish:001"
 ```
 
-Set `MAXOPS_TASK_ID` and `MAXOPS_RUN_ID` internally from the `connect` result; do not ask the user to do this wiring. Keep `MAXOPS_RECORD_ID` as the supplied read scope. Use `--agent-id` and `--agent-name` only for non-secret identity configuration. Reuse an idempotency key only when retrying the exact same logical mutation after an unknown outcome.
+Artifact URLs must be HTTP(S) without credentials, query parameters, or fragments.
 
-Use `status-request` only to propose a visible before/after change through the existing questions API. It sends Max a request; it does not create a Gate or update Feishu by itself. Max must confirm and perform the status change through the existing MAX OPS / Feishu Gate. After Max replies, poll `inbox`, apply the confirmed instruction inside scope, and `ack` it.
+## Close a full-mode feedback loop
 
-## Close a feedback loop
+1. Write the blocker and question with separate idempotency keys.
+2. Run `inbox --task ... --run ...` in `feishu_base_direct` mode.
+3. Accept only a message tied to the current instance, task, Agent, and run.
+4. Apply the answer inside the current authorization boundary.
+5. Run `ack --message ... --key ...`, preserve its `receipt_id`, and optionally verify it with `receipt --receipt ...`.
+6. Report resulting progress, artifact, or completion.
 
-1. Report the blocker and question.
-2. Poll `inbox` for the same Agent and run.
-3. Accept only a message tied to the current task, Agent, and run.
-4. Apply the answer only inside the current authorization boundary.
-5. Acknowledge the accepted message and preserve the returned `receipt_id`.
-6. Report the resulting progress, artifact, or completion.
-
-Read [references/api.md](references/api.md) for the endpoint contract and [references/other-agents.md](references/other-agents.md) when adapting the template to another Agent runtime.
-
-The machine-readable implementation is [adapter-manifest.json](adapter-manifest.json). [references/adapter-contract.md](references/adapter-contract.md) defines the runtime-neutral contract. Passing both local checks means manifest-valid and API-shape compatible; only a real authorized task can prove FEISHU LIVE.
+Read `references/adapter-contract.md`, then the selected adapter's reference. `references/minimum-permissions.md` defines the complete-mode Feishu permission floor.

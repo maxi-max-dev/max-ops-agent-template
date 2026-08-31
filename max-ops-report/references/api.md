@@ -1,37 +1,50 @@
-# MAX OPS Agent API
+# Transport and Feishu API mapping
 
-Supply the authorized Agent-API deployment with `MAXOPS_URL` or CLI `--url`. There is no implicit public default. The URL must serve the endpoints below; a static PairDesk Demo URL is not sufficient.
+## `webhook_write`
 
-| CLI command | Endpoint | Meaning |
-|---|---|---|
-| `connect` | manifest + health + scoped task read | read-only bootstrap that returns one stable `run_id` |
-| `health` | `GET /api/agent/v1/health` | authenticated connectivity check |
-| `task` | `GET /api/agent/v1/tasks/<record_id>` | read one scoped Feishu task projection |
-| `start` | `POST /api/agent/v1/events` | run started / running |
-| `progress` | `POST /api/agent/v1/events` | meaningful progress / running |
-| `blocked` | events, then optionally questions | blocker plus Max-facing question |
-| `status-request` | `POST /api/agent/v1/questions` | before/after status proposal; asks Max to use the separate Gate and never writes Feishu directly |
-| `artifact` | `POST /api/agent/v1/events` | artifact delivered |
-| `finish` | artifact when supplied, then finished | run finished |
-| `inbox` | `GET /api/agent/v1/inbox` | instructions and answers for this Agent/run |
-| `ack` | `POST /api/agent/v1/messages/<id>/receipts` | Agent accepted a message |
+The Connector sends one `POST` to the user-configured clean HTTPS URL:
 
-Every mutation requires a 12–200 character `Idempotency-Key`. Reuse a key only when retrying the same logical action after an uncertain network outcome.
+A native Feishu URL/token exists only when the user's Base plan exposes the `接收到 Webhook 时` trigger and the receiver has actually been created. Missing values are `not_connected`; the Connector does not synthesize them or route events through messages/forms.
 
-`connect` performs no mutation. It validates the bundled manifest, calls authenticated `health`, reads exactly the supplied `record_id`, and returns a session containing the returned `task_id`, confirmed `record_id`, and `run_id` to retain. A successful `connect` does not prove Feishu state writeback.
+```http
+Authorization: Bearer <local secret>
+Content-Type: application/json
+Idempotency-Key: <key>
+X-MAXOPS-Instance-ID: <instance_id>
+```
 
-`status-request` creates an Agent question only. It does not create a pending Gate command. Max must confirm and perform any five-state change through the existing MAX OPS / Feishu Gate, then answer the Agent through the inbox path.
+```json
+{
+  "schema_version": "maxops-webhook-write/1",
+  "instance_id": "copy-scope",
+  "idempotency_key": "agent:run:progress:001",
+  "payload_digest": "sha256-of-semantic-event",
+  "event": { "schema_version": "maxops-agent-event/1" }
+}
+```
 
-Task reads require a Base record ID supplied by the user. They return a whitelisted project/task projection, never raw Feishu fields, notes, credentials, or a full-board listing.
+The token appears only in the header. The webhook URL may not contain credentials, query parameters, or fragments. See `webhook-contract.md` for receiver requirements.
 
-Required event fields are `agent_id`, `agent_name`, `run_id`, `task_id`, `kind`, `state`, `title`, and `detail`. Send the `record_id` returned by `connect` as well; it is required whenever `record_id` and `task_id` differ. Optional artifact URLs must use HTTP(S) and contain no secrets.
+## `feishu_base_direct`
 
-HTTP handling:
+The direct adapter calls only the user's Feishu Open Platform:
 
-- `200`: successful read or idempotent replay.
-- `201`: new durable record.
-- `400`: invalid input; fix it.
-- `401`: missing or invalid Agent token.
-- `404`: wrong route, task, or message identity.
-- `409`: identity mismatch or idempotency-key reuse; stop.
-- `5xx` or timeout: retry the same action with the same key.
+| Purpose | Method and route |
+|---|---|
+| Obtain short-lived tenant token | `POST /open-apis/auth/v3/tenant_access_token/internal` |
+| Search scoped records | `POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/search` |
+| Create event/receipt | `POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records` |
+
+The App Secret is used only in the authentication request body; the resulting tenant token is used only in the `Authorization` header and is never returned or logged. Base app token and table IDs are resource locators loaded from the local environment; they are never embedded in the repository or output.
+
+Search requests use server-side `and` filters over stable machine fields. The adapter never lists unfiltered task, feedback, event, or receipt tables.
+
+The transport event keeps ISO-8601 `occurred_at`. At the Direct Base boundary only, the adapter converts it to an epoch-milliseconds number for Feishu's date-time field. Receipt `submitted_at` and `acknowledged_at` are the same `Date.now()` millisecond number. Invalid event time fails before any scoped read or mutation; it is never replaced with the current time.
+
+Feishu returns HTTP success plus a body `code`; both must indicate success. Network/`5xx` mutation outcomes are unknown and should be retried with the same idempotency key. Authentication, permission, identity, validation, or conflict failures are closed failures, not preview states.
+
+Relevant official references:
+
+- [Get custom app tenant_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)
+- [Search Base records](https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/search)
+- [Create a Base record](https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/create)
